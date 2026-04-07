@@ -61,6 +61,17 @@
       (def OAUTH-DOMAIN "logseq-test2.auth.us-east-2.amazoncognito.com")
       (def CONNECTIVITY-TESTING-S3-URL "https://logseq-connectivity-testing-prod.s3.us-east-1.amazonaws.com/logseq-connectivity-testing")))
 
+;; OneDrive / MSAL configuration
+;; ==============================
+(goog-define MSAL-CLIENT-ID "75ab3d28-440a-4f41-b46a-b4ed7cb420fc")
+(def msal-redirect-uri
+  (if dev?
+    "http://localhost:3001"
+    (let [loc js/window.location]
+      (str (.-origin loc)
+           (let [p (.-pathname loc)]
+             (subs p 0 (inc (.lastIndexOf p "/"))))))))
+
 ;; Feature flags
 ;; =============
 

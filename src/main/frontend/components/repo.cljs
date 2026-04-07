@@ -1,8 +1,10 @@
 (ns frontend.components.repo
-  (:require [frontend.components.widgets :as widgets]
+  (:require [frontend.auth.msal :as msal]
+            [frontend.components.widgets :as widgets]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
             [frontend.db :as db]
+            [frontend.handler.onedrive :as onedrive-handler]
             [frontend.handler.repo :as repo-handler]
             [frontend.handler.web.nfs :as nfs-handler]
             [frontend.state :as state]
@@ -101,13 +103,18 @@
          (when (seq local-graphs)
            (repos-inner local-graphs))
 
-         [:div.flex.flex-row.my-4
+         [:div.flex.flex-row.my-4.gap-4
           (when (or (nfs-handler/supported?)
                     (mobile-util/native-platform?))
-            [:div.mr-8
+            [:div
              (ui/button
                (t :open-a-directory)
-               :on-click #(state/pub-event! [:graph/setup-a-repo]))])]]
+               :on-click #(state/pub-event! [:graph/setup-a-repo]))])
+          (when (seq config/MSAL-CLIENT-ID)
+            [:div
+             (ui/button
+              (if (msal/logged-in?) "Sync OneDrive" "Connect OneDrive")
+              :on-click (fn [] (onedrive-handler/<connect-onedrive-graph!)))])]]
 
         (when (and (file-sync/enable-sync?) login?)
           [:div

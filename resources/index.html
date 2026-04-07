@@ -8,6 +8,8 @@
   <link href="./img/logo.png" rel="shortcut icon" type="image/png">
   <link href="./img/logo.png" rel="shortcut icon" sizes="192x192">
   <link href="./img/logo.png" rel="apple-touch-icon">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <meta name="theme-color" content="#002b36">
   <meta content="Logseq" name="apple-mobile-web-app-title">
   <meta content="yes" name="apple-mobile-web-app-capable">
   <meta content="yes" name="apple-touch-fullscreen">
@@ -65,5 +67,12 @@ const portal = new MagicPortal(worker);
 <script defer src="./js/code-editor.js"></script>
 <script defer src="./js/excalidraw.js"></script>
 <script defer src="./js/tldraw.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js');
+    });
+  }
+</script>
 </body>
 </html>

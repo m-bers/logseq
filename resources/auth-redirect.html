@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Signing in...</title>
+</head>
+<body>
+    <p>Processing authentication...</p>
+    <script src="./js/msal-redirect-bridge.min.js"></script>
+    <script>
+        msalRedirectBridge.broadcastResponseToMainFrame().catch(function(error) {
+            console.error("Auth redirect bridge error:", error);
+        });
+    </script>
+</body>
+</html>
