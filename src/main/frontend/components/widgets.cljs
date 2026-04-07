@@ -1,15 +1,15 @@
 (ns frontend.components.widgets
   (:require [frontend.auth.msal :as msal]
-            [frontend.context.i18n :refer [t]]
             [frontend.config :as config]
+            [frontend.context.i18n :refer [t]]
             [frontend.handler.onedrive :as onedrive-handler]
             [frontend.handler.page :as page-handler]
             [frontend.handler.web.nfs :as nfs]
-            [frontend.modules.shortcut.core :as shortcut]
-            [frontend.ui :as ui]
-            [rum.core :as rum]
             [frontend.mobile.util :as mobile-util]
-            [frontend.state :as state]))
+            [frontend.modules.shortcut.core :as shortcut]
+            [frontend.state :as state]
+            [frontend.ui :as ui]
+            [rum.core :as rum]))
 
 
 (rum/defc native-fs-api-alert

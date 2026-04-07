@@ -3,9 +3,9 @@
    - Login via MSAL
    - Pull files from OneDrive to LightningFS
    - Open as a file-based Logseq graph"
-  (:require [frontend.auth.msal :as msal]
+  (:require [clojure.string :as string]
+            [frontend.auth.msal :as msal]
             [frontend.config :as config]
-            [frontend.fs.onedrive :as graph-api]
             [frontend.handler.notification :as notification]
             [frontend.handler.web.nfs :as nfs-handler]
             [frontend.state :as state]
@@ -51,37 +51,47 @@
       (p/catch (fn [e]
                  (log/error :onedrive/logout-failed {:error e})))))
 
-(defn- <read-memory-dir-files
-  "Read all files from a memory:// directory recursively.
-   Returns {:path root-path :files [{:file/path ... :file/content ...}]}"
+(defn- <readdir-recursive
+  "Recursively read all file paths from LightningFS under dir.
+   Returns a vector of absolute paths (strings)."
+  [dir]
+  (p/let [entries (-> (.readdir js/window.pfs dir)
+                      (p/then (fn [r] (js->clj r))))]
+    (p/let [results
+            (p/all
+             (map (fn [entry]
+                    (let [full (path/path-join dir entry)]
+                      (p/let [stat (.stat js/window.pfs full)]
+                        (if (= (.-type stat) "file")
+                          (p/resolved [full])
+                          (<readdir-recursive full)))))
+                  entries))]
+      (vec (apply concat results)))))
+
+(defn- <read-onedrive-dir-as-graph
+  "Read all files from LightningFS and return in the format
+   that ls-dir-files-with-handler! expects from fs/open-dir:
+   {:path \"onedrive-Notes\" :files [{:name :path :mtime :size :type :content} ...]}"
   [local-dir]
-  (let [root (path/url-to-path local-dir)]
-    (p/let [all-paths (p/loop [result []
-                               dirs [root]]
-                        (if (empty? dirs)
-                          result
-                          (p/let [dir (first dirs)
-                                  entries (-> (.readdir js/window.pfs dir)
-                                              (p/then (fn [r] (js->clj r))))
-                                  children (p/all
-                                            (map (fn [entry]
-                                                   (let [full (path/path-join dir entry)]
-                                                     (p/let [stat (.stat js/window.pfs full)]
-                                                       {:path full
-                                                        :type (.-type stat)})))
-                                                 entries))
-                                  files (filterv #(= "file" (:type %)) children)
-                                  subdirs (mapv :path (filterv #(not= "file" (:type %)) children))]
-                            (p/recur (into result (map :path files))
-                                     (concat (rest dirs) subdirs)))))
+  (let [root (path/url-to-path local-dir)   ;; "/onedrive-Notes"
+        root-name (subs root 1)]            ;; "onedrive-Notes"
+    (p/let [all-paths (<readdir-recursive root)
             file-objs (p/all
                        (map (fn [fpath]
                               (p/let [content (-> (.readFile js/window.pfs fpath #js {:encoding "utf8"})
-                                                  (p/then (fn [c] (.toString c))))]
-                                {:file/path (str "memory://" fpath)
-                                 :file/content content}))
+                                                  (p/then (fn [c] (.toString c))))
+                                      stat (.stat js/window.pfs fpath)]
+                                (let [rel-path (subs fpath (inc (count root)))  ;; "pages/foo.md"
+                                      fname (last (string/split fpath #"/"))]   ;; "foo.md"
+                                  {:name    fname
+                                   :path    (str root-name "/" rel-path)  ;; "onedrive-Notes/pages/foo.md"
+                                   :mtime   (.-mtimeMs stat)
+                                   :size    (or (.-size stat) (count content))
+                                   :type    "file"
+                                   :content content})))
                             all-paths))]
-      {:path (str "memory://" root)
+      (log/info :onedrive/read-dir {:root root-name :files (count file-objs)})
+      {:path root-name
        :files (vec file-objs)})))
 
 (defn <connect-onedrive-graph!
@@ -92,17 +102,18 @@
     (-> (p/let [;; Step 1: Ensure logged in
                 _ (when-not (msal/logged-in?)
                     (<login!))
-                ;; Step 2: Pull all files
+                ;; Step 2: Pull all files from OneDrive to LightningFS
                 _ (notification/show! (str "Syncing from OneDrive/" onedrive-folder "...") :info)
                 _ (state/set-state! :onedrive/syncing? true)
                 files (onedrive-sync/initial-pull! onedrive-folder local-dir)
                 _ (state/set-state! :onedrive/syncing? false)
                 _ (notification/show! (str "Pulled " (count files) " files from OneDrive") :success)
-                ;; Step 3: Open as a file graph by providing a dir-result-fn
-                ;; that reads from LightningFS instead of showDirectoryPicker
+                ;; Step 3: Open as a file graph
+                ;; Provide dir-result-fn that reads from LightningFS in the format
+                ;; that matches what fs/open-dir returns for NFS graphs
                 _ (nfs-handler/ls-dir-files-with-handler!
                    nil
-                   {:dir-result-fn (fn [] (<read-memory-dir-files local-dir))})]
+                   {:dir-result-fn (fn [] (<read-onedrive-dir-as-graph local-dir))})]
           ;; Step 4: Start background sync
           (onedrive-sync/start! onedrive-folder local-dir)
           (log/info :onedrive/connected {:folder onedrive-folder :files (count files)}))
