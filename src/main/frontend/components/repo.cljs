@@ -176,7 +176,7 @@
                                    ;; New Window button in menu bar of macOS is available.
                                    (not util/mac?))
                           {:title        (t :open-new-window)
-                           :options {:on-click #(state/pub-event! [:graph/open-new-window nil])}})]
+                           :options {:on-click #(state/pub-event! [:graph/open-new-window nil])}})
         onedrive-link (when (seq config/MSAL-CLIENT-ID)
                         {:title (if (msal/logged-in?) "Sync OneDrive" "Connect OneDrive")
                          :options {:on-click (fn [] (onedrive-handler/<connect-onedrive-graph!))}})]
