@@ -6,6 +6,7 @@
   (:require [clojure.string :as string]
             [frontend.auth.msal :as msal]
             [frontend.config :as config]
+            [frontend.db :as db]
             [frontend.handler.notification :as notification]
             [frontend.handler.web.nfs :as nfs-handler]
             [frontend.state :as state]
@@ -102,13 +103,18 @@
     (-> (p/let [;; Step 1: Ensure logged in
                 _ (when-not (msal/logged-in?)
                     (<login!))
-                ;; Step 2: Pull all files from OneDrive to LightningFS
+                ;; Step 2: Close the current graph to avoid collisions
+                _ (let [current-repo (state/get-current-repo)]
+                    (when current-repo
+                      (db/remove-conn! current-repo)
+                      (state/set-current-repo! nil)))
+                ;; Step 3: Pull all files from OneDrive to LightningFS
                 _ (notification/show! (str "Syncing from OneDrive/" onedrive-folder "...") :info)
                 _ (state/set-state! :onedrive/syncing? true)
                 files (onedrive-sync/initial-pull! onedrive-folder local-dir)
                 _ (state/set-state! :onedrive/syncing? false)
                 _ (notification/show! (str "Pulled " (count files) " files from OneDrive") :success)
-                ;; Step 3: Open as a file graph
+                ;; Step 4: Open as a file graph
                 ;; Provide dir-result-fn that reads from LightningFS in the format
                 ;; that matches what fs/open-dir returns for NFS graphs
                 _ (nfs-handler/ls-dir-files-with-handler!
