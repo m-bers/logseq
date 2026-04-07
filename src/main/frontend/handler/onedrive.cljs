@@ -72,7 +72,9 @@
 (defn- <read-onedrive-dir-as-graph
   "Read all files from LightningFS and return in the format
    that ls-dir-files-with-handler! expects from fs/open-dir:
-   {:path \"onedrive-Notes\" :files [{:name :path :mtime :size :type :content} ...]}"
+   {:path \"onedrive-Notes\" :files [{:name :path :mtime :size :type :content} ...]}
+   File paths must be RELATIVE to the root (e.g. \"pages/foo.md\" not \"onedrive-Notes/pages/foo.md\")
+   to match how fs/open-dir normalizes paths."
   [local-dir]
   (let [root (path/url-to-path local-dir)   ;; "/onedrive-Notes"
         root-name (subs root 1)]            ;; "onedrive-Notes"
@@ -85,7 +87,7 @@
                                 (let [rel-path (subs fpath (inc (count root)))  ;; "pages/foo.md"
                                       fname (last (string/split fpath #"/"))]   ;; "foo.md"
                                   {:name    fname
-                                   :path    (str root-name "/" rel-path)  ;; "onedrive-Notes/pages/foo.md"
+                                   :path    rel-path  ;; "pages/foo.md" (relative to root)
                                    :mtime   (.-mtimeMs stat)
                                    :size    (or (.-size stat) (count content))
                                    :type    "file"
