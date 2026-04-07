@@ -1,11 +1,13 @@
 (ns frontend.components.widgets
-  (:require [frontend.context.i18n :refer [t]]
+  (:require [frontend.auth.msal :as msal]
+            [frontend.context.i18n :refer [t]]
+            [frontend.config :as config]
+            [frontend.handler.onedrive :as onedrive-handler]
             [frontend.handler.page :as page-handler]
             [frontend.handler.web.nfs :as nfs]
             [frontend.modules.shortcut.core :as shortcut]
             [frontend.ui :as ui]
             [rum.core :as rum]
-            [frontend.config :as config]
             [frontend.mobile.util :as mobile-util]
             [frontend.state :as state]))
 
@@ -47,7 +49,12 @@
            [:li (t :on-boarding/new-graph-desc-4)]
            [:li (t :on-boarding/new-graph-desc-5)]]
           (when-not nfs-supported?
-            (ui/admonition :warning (native-fs-api-alert)))]]]))])
+            (ui/admonition :warning (native-fs-api-alert)))]]
+        (when (seq config/MSAL-CLIENT-ID)
+          [:div.mt-6
+           (ui/button
+            (if (msal/logged-in?) "Sync OneDrive" "Connect OneDrive")
+            :on-click (fn [] (onedrive-handler/<connect-onedrive-graph!)))])]))])
 
 (rum/defc android-permission-alert
   []
