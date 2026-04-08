@@ -114,7 +114,10 @@
             [:div
              (ui/button
               (if (msal/logged-in?) "Sync OneDrive" "Connect OneDrive")
-              :on-click (fn [] (onedrive-handler/<connect-onedrive-graph!)))])]]
+              :on-click (fn []
+                          (if (msal/logged-in?)
+                            (onedrive-handler/<sync-onedrive!)
+                            (onedrive-handler/<connect-onedrive-graph!))))])]]
 
         (when (and (file-sync/enable-sync?) login?)
           [:div
@@ -179,7 +182,10 @@
                            :options {:on-click #(state/pub-event! [:graph/open-new-window nil])}})
         onedrive-link (when (seq config/MSAL-CLIENT-ID)
                         {:title (if (msal/logged-in?) "Sync OneDrive" "Connect OneDrive")
-                         :options {:on-click (fn [] (onedrive-handler/<connect-onedrive-graph!))}})]
+                         :options {:on-click (fn []
+                                              (if (msal/logged-in?)
+                                                (onedrive-handler/<sync-onedrive!)
+                                                (onedrive-handler/<connect-onedrive-graph!)))}})]
     (->>
      (concat repo-links
              [(when (seq repo-links) {:hr true})

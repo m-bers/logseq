@@ -54,7 +54,10 @@
           [:div.mt-6
            (ui/button
             (if (msal/logged-in?) "Sync OneDrive" "Connect OneDrive")
-            :on-click (fn [] (onedrive-handler/<connect-onedrive-graph!)))])]))])
+            :on-click (fn []
+                        (if (msal/logged-in?)
+                          (onedrive-handler/<sync-onedrive!)
+                          (onedrive-handler/<connect-onedrive-graph!))))])]))])
 
 (rum/defc android-permission-alert
   []

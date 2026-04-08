@@ -122,10 +122,23 @@
                 _ (nfs-handler/ls-dir-files-with-handler!
                    nil
                    {:dir-result-fn (fn [] (<read-onedrive-dir-as-graph local-dir))})]
-          ;; Step 4: Start background sync
+          ;; Step 5: Initialize sync state (manual sync only, no auto-sync)
           (onedrive-sync/start! onedrive-folder local-dir)
           (log/info :onedrive/connected {:folder onedrive-folder :files (count files)}))
         (p/catch (fn [e]
                    (state/set-state! :onedrive/syncing? false)
                    (notification/show! (str "Failed to connect OneDrive: " (str e)) :error)
                    (log/error :onedrive/connect-failed {:error e}))))))
+
+(defn <sync-onedrive!
+  "Manual sync: push dirty files then pull remote changes."
+  []
+  (-> (p/let [_ (notification/show! "Syncing with OneDrive..." :info)
+              _ (state/set-state! :onedrive/syncing? true)
+              _ (onedrive-sync/sync!)
+              _ (state/set-state! :onedrive/syncing? false)]
+        (notification/show! "OneDrive sync complete" :success))
+      (p/catch (fn [e]
+                 (state/set-state! :onedrive/syncing? false)
+                 (notification/show! (str "OneDrive sync failed: " (str e)) :error)
+                 (log/error :onedrive/sync-failed {:error e})))))

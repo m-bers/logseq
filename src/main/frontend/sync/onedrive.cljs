@@ -24,11 +24,8 @@
          :delta-link nil         ;; Graph API delta link for incremental sync
          :dirty-files #{}        ;; Set of local paths that need pushing
          :last-sync nil          ;; js/Date of last successful sync
-         :sync-interval-id nil   ;; setInterval ID
          :onedrive-folder nil    ;; e.g. "Notes"
          :local-dir nil}))       ;; e.g. "memory:///onedrive-notes"
-
-(def ^:private sync-interval-ms 30000) ;; 30 seconds
 (defonce ^:private pulling? (atom false)) ;; true during pull to suppress write-hook
 
 (def ^:private delta-link-key "logseq-onedrive-delta-link")
@@ -243,7 +240,7 @@
 ;; ---- Lifecycle ----
 
 (defn start!
-  "Start the OneDrive sync system.
+  "Initialize the OneDrive sync state and write hook (no auto-sync).
    onedrive-folder: remote folder name, e.g. 'Notes'
    local-dir: local memory:// path, e.g. 'memory:///onedrive-notes'"
   [onedrive-folder local-dir]
@@ -251,14 +248,6 @@
          :onedrive-folder onedrive-folder
          :local-dir local-dir
          :delta-link (load-delta-link))
-
-  ;; Listen for online/offline
-  (js/window.addEventListener "online"
-    (fn [_] (log/info :onedrive-sync/online {}) (sync!)))
-  (js/window.addEventListener "offline"
-    (fn [_]
-      (log/info :onedrive-sync/offline {})
-      (swap! sync-state assoc :status :offline)))
 
   ;; Register write hook to track dirty files for push
   ;; Skip during pulls to avoid push-back loops
@@ -269,24 +258,13 @@
                          (string/starts-with? fpath local-root))
                 (mark-dirty! fpath)))))
 
-  ;; Periodic sync
-  (let [interval-id (js/setInterval sync! sync-interval-ms)]
-    (swap! sync-state assoc :sync-interval-id interval-id))
-
-  ;; Initial sync
-  (sync!)
-
   (log/info :onedrive-sync/started {:folder onedrive-folder :local local-dir}))
 
 (defn stop!
   "Stop the sync system."
   []
-  (when-let [id (:sync-interval-id @sync-state)]
-    (js/clearInterval id))
   (reset! memory-fs/on-write-hook nil)
-  (swap! sync-state assoc
-         :sync-interval-id nil
-         :status :idle)
+  (swap! sync-state assoc :status :idle)
   (log/info :onedrive-sync/stopped {}))
 
 (defn get-sync-status
