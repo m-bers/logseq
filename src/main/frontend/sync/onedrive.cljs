@@ -116,13 +116,8 @@
         ;; relative path should be like pages/foo.md
         local-root (path/url-to-path local-dir)
         rel-path (subs local-path (inc (count local-root)))]
-    ;; handle-changed! compares dir to (config/get-local-dir repo) which is just
-    ;; the dir name without memory:// prefix. Pass local-dir so get-fs routes
-    ;; correctly, but the watcher handler's (= dir repo-dir) check uses
-    ;; get-local-dir which returns the name without prefix.
-    ;; Use "add" type which doesn't check (= dir repo-dir).
     (watcher-handler/handle-changed!
-     (if (= change-type "change") "add" change-type)
+     change-type
      {:dir local-dir
       :path rel-path
       :content content

@@ -70,7 +70,7 @@
                  (let [dir-name (last (string/split (path/url-to-path dir) #"/"))]
                    (str config/local-db-prefix dir-name))
                  :else (config/get-local-repo dir))
-          repo-dir (config/get-local-dir repo)
+          repo-dir (config/get-repo-dir repo)
           {:keys [mtime]} stat
           ext (keyword (path/file-ext path))]
       (when (contains? #{:org :md :markdown :css :js :edn :excalidraw :tldr} ext)
