@@ -12,6 +12,7 @@
             [frontend.auth.msal :as msal]
             [frontend.fs.memory-fs :as memory-fs]
             [frontend.fs.onedrive :as graph]
+            [frontend.fs.watcher-handler :as watcher-handler]
             [lambdaisland.glogi :as log]
             [logseq.common.path :as path]
             [promesa.core :as p]))
@@ -28,6 +29,7 @@
          :local-dir nil}))       ;; e.g. "memory:///onedrive-notes"
 
 (def ^:private sync-interval-ms 30000) ;; 30 seconds
+(defonce ^:private pulling? (atom false)) ;; true during pull to suppress write-hook
 
 (def ^:private delta-link-key "logseq-onedrive-delta-link")
 
@@ -106,8 +108,24 @@
 
 ;; ---- Pull (remote → local) ----
 
+(defn- notify-file-change!
+  "Notify Logseq's watcher handler about a file change so the datascript DB is updated."
+  [local-path content change-type]
+  (let [{:keys [local-dir]} @sync-state
+        dir local-dir
+        ;; local-path is absolute like /onedrive-Notes/pages/foo.md
+        ;; relative path should be like pages/foo.md
+        local-root (path/url-to-path local-dir)
+        rel-path (subs local-path (inc (count local-root)))]
+    (watcher-handler/handle-changed!
+     change-type
+     {:dir dir
+      :path rel-path
+      :content content
+      :stat {:mtime (js/Date.now)}})))
+
 (defn- apply-remote-change
-  "Apply a single remote change to local fs."
+  "Apply a single remote change to local fs and update datascript DB."
   [token change]
   (let [remote-path (get-in change [:parentReference :path])
         name (:name change)
@@ -120,25 +138,30 @@
             local-path (when full-remote (remote->local full-remote))]
         (when local-path
           (if deleted?
-            (do (log/info :onedrive-sync/delete-local {:path local-path})
-                (local-unlink local-path))
+            (p/do!
+             (log/info :onedrive-sync/delete-local {:path local-path})
+             (local-unlink local-path)
+             (notify-file-change! local-path nil "unlink"))
             (p/let [content (graph/read-file token full-remote)]
               (log/info :onedrive-sync/pull-file {:remote full-remote :local local-path})
-              (local-write local-path content))))))))
+              (local-write local-path content)
+              (notify-file-change! local-path content "change"))))))))
 
 (defn pull!
-  "Pull remote changes from OneDrive to local."
+  "Pull remote changes from OneDrive to local and update datascript DB."
   []
   (when (msal/logged-in?)
-    (p/let [token (msal/get-token)
-            {:keys [onedrive-folder]} @sync-state
-            delta-link (or (:delta-link @sync-state) (load-delta-link))
-            {:keys [changes delta-link]} (graph/get-delta token onedrive-folder delta-link)]
-      (log/info :onedrive-sync/pull {:changes (count changes)})
-      (p/let [_ (p/all (map (partial apply-remote-change token) changes))]
-        (swap! sync-state assoc :delta-link delta-link)
-        (save-delta-link! delta-link)
-        (count changes)))))
+    (reset! pulling? true)
+    (-> (p/let [token (msal/get-token)
+                {:keys [onedrive-folder]} @sync-state
+                delta-link (or (:delta-link @sync-state) (load-delta-link))
+                {:keys [changes delta-link]} (graph/get-delta token onedrive-folder delta-link)]
+          (log/info :onedrive-sync/pull {:changes (count changes)})
+          (p/let [_ (p/all (map (partial apply-remote-change token) changes))]
+            (swap! sync-state assoc :delta-link delta-link)
+            (save-delta-link! delta-link)
+            (count changes)))
+        (p/finally (fn [_] (reset! pulling? false))))))
 
 ;; ---- Push (local → remote) ----
 
@@ -232,10 +255,12 @@
       (swap! sync-state assoc :status :offline)))
 
   ;; Register write hook to track dirty files for push
+  ;; Skip during pulls to avoid push-back loops
   (let [local-root (path/url-to-path local-dir)]
     (reset! memory-fs/on-write-hook
             (fn [fpath]
-              (when (string/starts-with? fpath local-root)
+              (when (and (not @pulling?)
+                         (string/starts-with? fpath local-root))
                 (mark-dirty! fpath)))))
 
   ;; Periodic sync
