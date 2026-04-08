@@ -76,7 +76,8 @@
   [local-dir]
   (let [root (path/url-to-path local-dir)
         root-name (subs root 1)]
-    (p/let [all-paths (<readdir-recursive root)
+    (p/let [all-paths (-> (<readdir-recursive root)
+                          (p/catch (fn [_] [])))
             file-objs (p/all
                        (map (fn [fpath]
                               (p/let [content (-> (.readFile js/window.pfs fpath #js {:encoding "utf8"})
@@ -121,7 +122,11 @@
                   (when current-repo
                     (db/remove-conn! current-repo)
                     (state/set-current-repo! nil)))
-              ;; Step 5: Pull ZIP from OneNote
+              ;; Step 5: Ensure local directory exists
+              local-root (path/url-to-path local-dir)
+              _ (-> (js/window.pfs.mkdir local-root)
+                    (p/catch (fn [_] nil)))
+              ;; Step 6: Pull ZIP from OneNote
               _ (notification/show! (str "Syncing from OneNote/" graph-name "...") :info)
               _ (state/set-state! :onenote/syncing? true)
               file-count (onenote-sync/initial-pull! section-id graph-name site-id local-dir)
@@ -156,6 +161,10 @@
                       (when current-repo
                         (db/remove-conn! current-repo)
                         (state/set-current-repo! nil)))
+                  ;; Ensure local directory exists
+                  local-root (path/url-to-path local-dir)
+                  _ (-> (js/window.pfs.mkdir local-root)
+                        (p/catch (fn [_] nil)))
                   ;; Pull
                   _ (notification/show! (str "Syncing from OneNote/" graph-name "...") :info)
                   _ (state/set-state! :onenote/syncing? true)
@@ -178,8 +187,15 @@
                      (log/error :onenote/reconnect-failed {:error e})))))))
 
 (defn <sync-onenote!
-  "Manual sync: pull remote changes (with merge), then push local state."
+  "Manual sync: pull remote changes (with merge), then push local state.
+   If sync state isn't initialized, loads saved config first."
   []
+  ;; Ensure sync state is initialized from saved config
+  (when (and (nil? (:section-id @onenote-sync/sync-state))
+             (onenote-sync/load-config))
+    (let [config (onenote-sync/load-config)
+          local-dir (str "memory:///onenote-" (string/replace (:graph-name config) #"[^a-zA-Z0-9_-]" "_"))]
+      (onenote-sync/start! (assoc config :local-dir local-dir))))
   (-> (p/let [_ (notification/show! "Syncing with OneNote..." :info)
               _ (state/set-state! :onenote/syncing? true)
               _ (onenote-sync/sync!)
