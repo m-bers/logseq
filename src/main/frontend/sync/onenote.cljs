@@ -297,6 +297,11 @@
   (swap! sync-state assoc :status :idle)
   (log/info :onenote-sync/stopped {}))
 
+(defn initialized?
+  "Returns true if sync state has been configured."
+  []
+  (some? (:section-id @sync-state)))
+
 (defn get-sync-status
   "Returns current sync status for UI display."
   []
