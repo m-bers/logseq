@@ -62,8 +62,13 @@
           ;; on the client to correctly identify it
           repo (cond
                  global-dir (state/get-current-repo)
-                 ;; FIXME(andelf): hack for demo graph, demo graph does not bind to local directory
-                 (string/starts-with? dir "memory://") "local"
+                 ;; memory:// paths: demo graph uses /local, onedrive uses /onedrive-*
+                 (and (string/starts-with? dir "memory://")
+                      (string/includes? dir "/local"))
+                 "local"
+                 (string/starts-with? dir "memory://")
+                 (let [dir-name (last (string/split (path/url-to-path dir) #"/"))]
+                   (str config/local-db-prefix dir-name))
                  :else (config/get-local-repo dir))
           repo-dir (config/get-local-dir repo)
           {:keys [mtime]} stat
