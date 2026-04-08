@@ -8,7 +8,9 @@
    - This layer runs in the background, pushing/pulling changes
    - Uses Graph API delta endpoint for efficient incremental sync
    - Queues writes when offline, flushes when back online"
-  (:require [frontend.auth.msal :as msal]
+  (:require [clojure.string :as string]
+            [frontend.auth.msal :as msal]
+            [frontend.fs.memory-fs :as memory-fs]
             [frontend.fs.onedrive :as graph]
             [lambdaisland.glogi :as log]
             [logseq.common.path :as path]
@@ -229,6 +231,13 @@
       (log/info :onedrive-sync/offline {})
       (swap! sync-state assoc :status :offline)))
 
+  ;; Register write hook to track dirty files for push
+  (let [local-root (path/url-to-path local-dir)]
+    (reset! memory-fs/on-write-hook
+            (fn [fpath]
+              (when (string/starts-with? fpath local-root)
+                (mark-dirty! fpath)))))
+
   ;; Periodic sync
   (let [interval-id (js/setInterval sync! sync-interval-ms)]
     (swap! sync-state assoc :sync-interval-id interval-id))
@@ -243,6 +252,7 @@
   []
   (when-let [id (:sync-interval-id @sync-state)]
     (js/clearInterval id))
+  (reset! memory-fs/on-write-hook nil)
   (swap! sync-state assoc
          :sync-interval-id nil
          :status :idle)

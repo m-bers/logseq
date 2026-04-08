@@ -8,6 +8,10 @@
             [logseq.common.path :as path]
             [promesa.core :as p]))
 
+;; Write hook for external observers (e.g. OneDrive sync).
+;; Set to a (fn [absolute-path]) to be notified on every write.
+(defonce on-write-hook (atom nil))
+
 (defn- <readdir
   "Read dir recursively, return all paths
 
@@ -117,7 +121,9 @@
             _ (<ensure-dir! containing-dir)
             _ (js/window.pfs.writeFile fpath content)]
       (db/set-file-content! repo rpath content)
-      (db/set-file-last-modified-at! repo rpath (js/Date.))))
+      (db/set-file-last-modified-at! repo rpath (js/Date.))
+      (when-let [hook @on-write-hook]
+        (hook fpath))))
   (rename! [_this _repo old-path new-path]
     (let [old-path (path/url-to-path old-path)
           new-path (path/url-to-path new-path)]
