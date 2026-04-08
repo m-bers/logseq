@@ -1,7 +1,6 @@
 (ns frontend.handler.onenote
-  "Handler for OneNote graph operations:
-   - Login via MSAL
-   - Connect current graph to a OneNote notebook
+  "Handler for OneNote graph sync:
+   - Connect current local folder graph to a OneNote notebook
    - Manual sync (push/pull with three-way merge)"
   (:require [frontend.auth.msal :as msal]
             [frontend.config :as config]
@@ -27,9 +26,8 @@
   []
   (if (msal/initialized?)
     (-> (msal/login!)
-        (p/then (fn [account]
-                  (notification/show! (str "Signed in as " (:name (msal/get-account))) :success)
-                  account))
+        (p/then (fn [_account]
+                  (notification/show! (str "Signed in as " (:name (msal/get-account))) :success)))
         (p/catch (fn [e]
                    (notification/show! "OneNote sign-in failed" :error)
                    (log/error :onenote/login-failed {:error e}))))
@@ -37,32 +35,32 @@
       (notification/show! "MSAL not initialized." :warning)
       (p/rejected (ex-info "MSAL not initialized" {})))))
 
-(defn <logout!
-  "Logout from OneNote."
-  []
-  (onenote-sync/stop!)
-  (-> (msal/logout!)
-      (p/then (fn [_]
-                (notification/show! "Signed out of OneNote" :success)))
-      (p/catch (fn [e]
-                 (log/error :onenote/logout-failed {:error e})))))
-
 ;; ---- Connect flow ----
 
 (defn <connect-onenote-graph!
-  "Connect the current graph to a OneNote notebook.
-   Resolves notebook from URL, sets up sync config, and pushes current graph.
-   notebook-url: a OneNote URL or OneIntraNote URL to identify the notebook."
+  "Connect the current local folder graph to a OneNote notebook.
+   1. Login if needed
+   2. Resolve notebook from pasted URL
+   3. Find/create 'Logseq' section
+   4. If page matching folder name exists → sync (pull+merge+push)
+   5. If no matching page → push local graph as new page
+   6. Save config for future syncs"
   [notebook-url]
-  (let [current-repo (state/get-current-repo)
-        local-dir (when current-repo
-                    (config/get-repo-dir current-repo))]
-    (when-not local-dir
-      (notification/show! "No graph loaded to sync" :warning))
-    (when local-dir
-      (-> (p/let [;; Step 1: Ensure logged in
-                  _ (when-not (msal/logged-in?)
-                      (<login!))
+  (let [repo (state/get-current-repo)
+        repo-dir (when repo (config/get-repo-dir repo))
+        is-local? (and repo (config/local-db? repo) (not (config/demo-graph? repo)))]
+    (cond
+      (not is-local?)
+      (do (notification/show! "Open a local folder graph first, then connect to OneNote." :warning)
+          (p/resolved nil))
+
+      (not (seq notebook-url))
+      (do (notification/show! "No notebook URL provided." :warning)
+          (p/resolved nil))
+
+      :else
+      (-> (p/let [;; Step 1: Login
+                  _ (when-not (msal/logged-in?) (<login!))
                   token (msal/get-token)
                   ;; Step 2: Resolve notebook from URL
                   _ (notification/show! "Finding notebook..." :info)
@@ -70,45 +68,55 @@
                   _ (when-not notebook
                       (throw (ex-info "Could not find notebook from URL" {:url notebook-url})))
                   {:keys [name id site-id]} notebook
-                  ;; Step 3: Find or create "Logseq" section
+                  ;; Step 3: Find/create section
                   section (onenote/find-or-create-section token id config/ONENOTE-SECTION-NAME site-id)
                   section-id (:id section)
-                  graph-name name]
-            ;; Step 4: Initialize sync state pointing to current graph
+                  ;; Use the local folder name as the page title in OneNote
+                  graph-name repo-dir]
+            ;; Step 4: Initialize sync state
             (onenote-sync/start! {:section-id section-id
                                    :notebook-id id
                                    :site-id site-id
-                                   :graph-name graph-name
-                                   :local-dir local-dir})
-            ;; Step 5: Push current graph to OneNote
-            (p/let [_ (notification/show! (str "Pushing to OneNote/" graph-name "...") :info)
-                    _ (state/set-state! :onenote/syncing? true)
-                    _ (onenote-sync/push!)
-                    _ (state/set-state! :onenote/syncing? false)]
-              (notification/show! "Connected to OneNote and synced" :success)
-              (log/info :onenote/connected {:notebook name})))
+                                   :graph-name graph-name})
+            ;; Step 5: Check if matching page exists
+            (p/let [existing-page (onenote/find-page token section-id graph-name site-id)]
+              (if existing-page
+                ;; Page exists → full sync (pull+merge+push)
+                (p/let [_ (notification/show! (str "Found existing graph '" graph-name "', syncing...") :info)
+                        _ (state/set-state! :onenote/syncing? true)
+                        _ (onenote-sync/sync!)
+                        _ (state/set-state! :onenote/syncing? false)]
+                  (notification/show! "Connected and synced with OneNote" :success))
+                ;; No page → push local as new
+                (p/let [_ (notification/show! (str "Pushing '" graph-name "' to OneNote...") :info)
+                        _ (state/set-state! :onenote/syncing? true)
+                        _ (onenote-sync/push!)
+                        _ (state/set-state! :onenote/syncing? false)]
+                  (notification/show! "Connected to OneNote and uploaded graph" :success))))
+            (log/info :onenote/connected {:notebook name :graph graph-name}))
           (p/catch (fn [e]
                      (state/set-state! :onenote/syncing? false)
                      (notification/show! (str "Failed to connect OneNote: " (str e)) :error)
                      (log/error :onenote/connect-failed {:error e})))))))
 
+;; ---- Sync flow ----
+
 (defn <sync-onenote!
-  "Manual sync: pull remote changes (with merge), then push local state.
-   If sync state isn't initialized, loads saved config first."
+  "Manual sync: pull remote changes (with merge), then push local state."
   []
   ;; Ensure sync state is initialized from saved config
-  (when-let [config (and (not (onenote-sync/initialized?))
-                         (onenote-sync/load-config))]
-    (let [current-repo (state/get-current-repo)
-          local-dir (when current-repo (config/get-repo-dir current-repo))]
-      (when local-dir
-        (onenote-sync/start! (assoc config :local-dir local-dir)))))
-  (-> (p/let [_ (notification/show! "Syncing with OneNote..." :info)
-              _ (state/set-state! :onenote/syncing? true)
-              _ (onenote-sync/sync!)
-              _ (state/set-state! :onenote/syncing? false)]
-        (notification/show! "OneNote sync complete" :success))
-      (p/catch (fn [e]
-                 (state/set-state! :onenote/syncing? false)
-                 (notification/show! (str "OneNote sync failed: " (str e)) :error)
-                 (log/error :onenote/sync-failed {:error e})))))
+  (when (and (not (onenote-sync/initialized?))
+             (onenote-sync/load-config))
+    (onenote-sync/start! (onenote-sync/load-config)))
+  (if-not (onenote-sync/initialized?)
+    (do (notification/show! "Not connected to OneNote. Use 'Connect OneNote' first." :warning)
+        (p/resolved nil))
+    (-> (p/let [_ (notification/show! "Syncing with OneNote..." :info)
+                _ (state/set-state! :onenote/syncing? true)
+                _ (onenote-sync/sync!)
+                _ (state/set-state! :onenote/syncing? false)]
+          (notification/show! "OneNote sync complete" :success))
+        (p/catch (fn [e]
+                   (state/set-state! :onenote/syncing? false)
+                   (notification/show! (str "OneNote sync failed: " (str e)) :error)
+                   (log/error :onenote/sync-failed {:error e}))))))

@@ -1,22 +1,22 @@
 (ns frontend.sync.onenote
   "OneNote sync orchestrator.
-   Manages bidirectional sync between local MemoryFs (LightningFS/IndexedDB)
-   and a OneNote notebook via ZIP attachments on pages.
+   Syncs a local folder graph to/from a OneNote notebook via ZIP attachments.
 
    Architecture:
-   - Local state: LightningFS at /onenote-{name}/
-   - Base snapshot: LightningFS at /onenote-{name}-base/ (last synced state for merge)
-   - Remote state: ZIP attachment on a OneNote page
-   - Merge: three-way merge per file using diff_merge.cljs"
+   - Local: real folder via File System Access API (NFS handles)
+   - Remote: ZIP attachment on a OneNote page
+   - Base: .logseq-onenote-base/ subfolder for three-way merge ancestry
+   - Merge: per-file three-way merge using diff_merge.cljs"
   (:require [clojure.string :as string]
             [frontend.auth.msal :as msal]
+            [frontend.config :as config]
+            [frontend.fs :as fs]
             [frontend.fs.diff-merge :as diff-merge]
-            [frontend.fs.memory-fs :as memory-fs]
             [frontend.fs.onenote :as onenote]
             [frontend.fs.watcher-handler :as watcher-handler]
             [frontend.fs.zip-graph :as zip-graph]
+            [frontend.state :as state]
             [lambdaisland.glogi :as log]
-            [logseq.common.path :as path]
             [promesa.core :as p]))
 
 ;; ---- State ----
@@ -26,12 +26,10 @@
          :section-id nil      ;; OneNote section ID
          :notebook-id nil     ;; OneNote notebook ID
          :site-id nil         ;; Graph API site ID (SharePoint)
-         :graph-name nil      ;; Page title in OneNote
-         :local-dir nil       ;; memory:///onenote-{name}
-         :last-sync nil       ;; js/Date of last successful sync
-         :dirty? false}))     ;; true if local has unsaved changes
-
-(defonce ^:private pulling? (atom false))
+         :graph-name nil      ;; Page title in OneNote (= folder name)
+         :repo nil            ;; Logseq repo URL (e.g. "logseq_local_my-notes")
+         :repo-dir nil        ;; Local folder name (e.g. "my-notes")
+         :last-sync nil}))    ;; js/Date of last successful sync
 
 ;; ---- Config persistence ----
 
@@ -49,48 +47,43 @@
     (js->clj (js/JSON.parse json) :keywordize-keys true)))
 
 ;; ---- Base snapshot management ----
+;; The base snapshot tracks what was last synced so we can three-way merge.
+;; It's stored as a simple JSON map in localStorage (not files).
+;; Key: "logseq-onenote-base-{repo-dir}"
 
-(defn- base-dir
-  "Returns the absolute LightningFS path for the base snapshot."
-  [local-dir]
-  (str (path/url-to-path local-dir) "-base"))
+(defn- base-key [repo-dir]
+  (str "logseq-onenote-base-" repo-dir))
 
-(defn- <save-base-snapshot!
-  "Write all files from file-map to the base snapshot directory."
-  [local-dir file-map]
-  (let [bdir (base-dir local-dir)]
-    ;; Clear existing base
-    (-> (js/window.workerThread.rimraf bdir)
-        (p/catch (fn [_] nil)))
-    (p/let [_ (js/window.pfs.mkdir bdir)]
-      (p/all
-       (map (fn [[rel-path content]]
-              (let [full-path (path/path-join bdir rel-path)
-                    parent (path/parent full-path)]
-                (p/let [_ (zip-graph/<mkdir-recursive! parent)]
-                  (.writeFile js/window.pfs full-path content))))
-            file-map)))))
+(defn- save-base-snapshot!
+  "Save the base snapshot (file map) to localStorage."
+  [repo-dir file-map]
+  ;; Store as JSON. For large graphs this could be big, but localStorage has 5-10MB.
+  ;; For very large graphs, consider IndexedDB.
+  (let [json (js/JSON.stringify (clj->js file-map))]
+    (.setItem js/localStorage (base-key repo-dir) json)))
 
-(defn- <read-base-snapshot
-  "Read all files from the base snapshot. Returns {path -> content} or empty map."
-  [local-dir]
-  (let [bdir (base-dir local-dir)]
-    (-> (zip-graph/<read-local-files (str "memory://" bdir))
-        (p/catch (fn [_] {})))))
+(defn- load-base-snapshot
+  "Load the base snapshot from localStorage. Returns {path content} or empty map."
+  [repo-dir]
+  (if-let [json (.getItem js/localStorage (base-key repo-dir))]
+    (js->clj (js/JSON.parse json))
+    {}))
 
 ;; ---- Three-way merge ----
 
 (defn- hash-content
-  "Simple hash for content comparison. Returns nil for nil content."
+  "Simple hash for content comparison."
   [content]
   (when content
-    (str (count content) "-" (.toString (js/Uint32Array. #js [(reduce (fn [h c] (+ (bit-shift-left h 5) (- h) (.charCodeAt c 0))) 0 content)]) "36"))))
+    (str (count content) "-"
+         (.toString
+          (js/Uint32Array.
+           #js [(reduce (fn [h c] (+ (bit-shift-left h 5) (- h) (.charCodeAt c 0)))
+                        0 content)])
+          "36"))))
 
 (defn <merge-file-maps
   "Three-way merge of file maps.
-   base-files: {path content} from last sync
-   local-files: {path content} from LightningFS
-   remote-files: {path content} from OneNote ZIP
    Returns {:merged {path content} :conflicts [{:path :reason}]}."
   [base-files local-files remote-files]
   (let [all-paths (set (concat (keys base-files) (keys local-files) (keys remote-files)))
@@ -142,80 +135,64 @@
                      {:path fpath :reason "both-changed-non-mergeable"}))))))
     @results))
 
-;; ---- Watcher notification ----
-
-(defn- notify-file-change!
-  "Notify Logseq's watcher handler about a file change so the datascript DB is updated."
-  [local-dir local-path content change-type]
-  (let [local-root (path/url-to-path local-dir)
-        rel-path (subs local-path (inc (count local-root)))]
-    (watcher-handler/handle-changed!
-     change-type
-     {:dir local-dir
-      :path rel-path
-      :content content
-      :stat {:mtime (js/Date.now)}})))
-
 ;; ---- Sync operations ----
 
 (defn pull!
-  "Download ZIP from OneNote, three-way merge with local, update LightningFS + datascript.
+  "Download ZIP from OneNote, three-way merge with local, write changes.
    Returns {:pulled count :conflicts [...]}."
   []
   (when (msal/logged-in?)
-    (reset! pulling? true)
-    (-> (p/let [token (msal/get-token)
-                {:keys [section-id site-id graph-name local-dir]} @sync-state
-                ;; Step 1-3: Find page and download ZIP (3 API calls)
-                page (onenote/find-page token section-id graph-name site-id)]
-          (if-not page
-            (do (log/info :onenote-sync/no-remote-page {:graph-name graph-name})
-                {:pulled 0 :conflicts []})
-            (p/let [zip-url (onenote/get-page-zip-url token (:id page) site-id)
-                    _ (when-not zip-url
-                        (throw (ex-info "No ZIP attachment on page" {:page-id (:id page)})))
-                    zip-data (onenote/download-zip token zip-url)
-                    ;; Step 4: Unpack remote
-                    remote-files (zip-graph/<unpack-zip zip-data)
-                    ;; Step 5-6: Read base and local
-                    base-files (<read-base-snapshot local-dir)
-                    local-files (zip-graph/<read-local-files local-dir)
-                    ;; Step 7: Three-way merge
-                    {:keys [merged conflicts]} (<merge-file-maps base-files local-files remote-files)
-                    ;; Step 8: Write merged files to local FS
-                    local-root (path/url-to-path local-dir)
-                    _ (p/all
-                       (map (fn [[rel-path content]]
-                              (let [old-content (get local-files rel-path)
-                                    full-path (path/path-join local-root rel-path)]
-                                (when (not= content old-content)
-                                  (let [parent (path/parent full-path)]
-                                    (p/let [_ (zip-graph/<mkdir-recursive! parent)
-                                            _ (.writeFile js/window.pfs full-path content)]
-                                      ;; Step 9: Notify watcher
-                                      (notify-file-change! local-dir full-path content "change"))))))
-                            merged))
-                    ;; Step 10: Save base snapshot
-                    _ (<save-base-snapshot! local-dir merged)]
-              (log/info :onenote-sync/pull-complete {:files (count merged) :conflicts (count conflicts)})
-              {:pulled (count merged) :conflicts conflicts})))
-        (p/finally (fn [_] (reset! pulling? false))))))
+    (p/let [token (msal/get-token)
+            {:keys [section-id site-id graph-name repo repo-dir]} @sync-state
+            ;; Find page
+            page (onenote/find-page token section-id graph-name site-id)]
+      (if-not page
+        (do (log/info :onenote-sync/no-remote-page {:graph-name graph-name})
+            {:pulled 0 :conflicts []})
+        (p/let [;; Download ZIP (3 API calls total)
+                zip-url (onenote/get-page-zip-url token (:id page) site-id)
+                _ (when-not zip-url
+                    (throw (ex-info "No ZIP attachment on page" {:page-id (:id page)})))
+                zip-data (onenote/download-zip token zip-url)
+                ;; Unpack remote
+                remote-files (zip-graph/<unpack-zip zip-data)
+                ;; Read base and local
+                base-files (load-base-snapshot repo-dir)
+                local-files (zip-graph/<read-local-files repo-dir)
+                ;; Three-way merge
+                {:keys [merged conflicts]} (<merge-file-maps base-files local-files remote-files)
+                ;; Write changed files to local folder
+                _ (p/all
+                   (keep (fn [[rel-path content]]
+                           (let [old-content (get local-files rel-path)]
+                             (when (not= content old-content)
+                               (p/let [_ (zip-graph/<write-file-to-local repo repo-dir rel-path content)]
+                                 ;; Notify watcher so datascript DB updates
+                                 (watcher-handler/handle-changed!
+                                  "change"
+                                  {:dir repo-dir
+                                   :path rel-path
+                                   :content content
+                                   :stat {:mtime (js/Date.now)}})))))
+                         merged))
+                ;; Save base snapshot
+                _ (save-base-snapshot! repo-dir merged)]
+          (log/info :onenote-sync/pull-complete {:files (count merged) :conflicts (count conflicts)})
+          {:pulled (count merged) :conflicts conflicts})))))
 
 (defn push!
-  "Pack local graph to ZIP and upload to OneNote.
-   Returns Promise."
+  "Pack local graph to ZIP and upload to OneNote."
   []
   (when (msal/logged-in?)
     (p/let [token (msal/get-token)
-            {:keys [section-id site-id graph-name local-dir]} @sync-state
+            {:keys [section-id site-id graph-name repo-dir]} @sync-state
             ;; Pack local files to ZIP
-            zip-data (zip-graph/<pack-graph local-dir)
+            zip-data (zip-graph/<pack-graph repo-dir)
             ;; Upload (delete + wait + create = 2-3 API calls)
             _ (onenote/replace-page-zip token section-id graph-name zip-data site-id)
             ;; Save current local as base snapshot
-            local-files (zip-graph/<read-local-files local-dir)
-            _ (<save-base-snapshot! local-dir local-files)]
-      (swap! sync-state assoc :dirty? false)
+            local-files (zip-graph/<read-local-files repo-dir)
+            _ (save-base-snapshot! repo-dir local-files)]
       (log/info :onenote-sync/push-complete {:files (count local-files)}))))
 
 (defn sync!
@@ -236,73 +213,30 @@
                    (log/error :onenote-sync/error {:error error})
                    (throw error))))))
 
-;; ---- Initial sync (first connection) ----
-
-(defn initial-pull!
-  "First-time sync: download ZIP from OneNote, unpack to local FS + base snapshot.
-   No merge needed (no local state yet).
-   Returns file count."
-  [section-id graph-name site-id local-dir]
-  (p/let [token (msal/get-token)
-          page (onenote/find-page token section-id graph-name site-id)]
-    (if-not page
-      ;; No remote page yet — empty graph, just create base dir
-      (do (log/info :onenote-sync/no-remote {:graph-name graph-name})
-          0)
-      (p/let [zip-url (onenote/get-page-zip-url token (:id page) site-id)
-              _ (when-not zip-url
-                  (throw (ex-info "No ZIP attachment on page" {:page-id (:id page)})))
-              zip-data (onenote/download-zip token zip-url)
-              ;; Unpack to local FS
-              local-root (path/url-to-path local-dir)
-              file-map (zip-graph/<unpack-zip-to-fs zip-data local-root)
-              ;; Save as base snapshot
-              _ (<save-base-snapshot! local-dir file-map)]
-        (log/info :onenote-sync/initial-pull {:files (count file-map)})
-        (count file-map)))))
-
 ;; ---- Lifecycle ----
 
 (defn start!
-  "Initialize sync state and write hook (manual sync only).
-   config: {:section-id :notebook-id :site-id :graph-name :local-dir}"
-  [{:keys [section-id notebook-id site-id graph-name local-dir]}]
-  (swap! sync-state assoc
-         :section-id section-id
-         :notebook-id notebook-id
-         :site-id site-id
-         :graph-name graph-name
-         :local-dir local-dir)
+  "Initialize sync state from config."
+  [{:keys [section-id notebook-id site-id graph-name]}]
+  (let [repo (state/get-current-repo)
+        repo-dir (config/get-repo-dir repo)]
+    (swap! sync-state assoc
+           :section-id section-id
+           :notebook-id notebook-id
+           :site-id site-id
+           :graph-name graph-name
+           :repo repo
+           :repo-dir repo-dir)
+    ;; Save config for reconnect
+    (save-config! {:section-id section-id
+                    :notebook-id notebook-id
+                    :site-id site-id
+                    :graph-name graph-name})
+    (log/info :onenote-sync/started {:graph-name graph-name :repo-dir repo-dir})))
 
-  ;; Register write hook to track dirty state
-  (let [local-root (path/url-to-path local-dir)]
-    (reset! memory-fs/on-write-hook
-            (fn [fpath]
-              (when (and (not @pulling?)
-                         (string/starts-with? fpath local-root))
-                (swap! sync-state assoc :dirty? true)))))
-
-  ;; Save config for reconnect
-  (save-config! {:section-id section-id
-                  :notebook-id notebook-id
-                  :site-id site-id
-                  :graph-name graph-name})
-
-  (log/info :onenote-sync/started {:graph-name graph-name}))
-
-(defn stop!
-  "Stop the sync system."
-  []
-  (reset! memory-fs/on-write-hook nil)
+(defn stop! []
   (swap! sync-state assoc :status :idle)
   (log/info :onenote-sync/stopped {}))
 
-(defn initialized?
-  "Returns true if sync state has been configured."
-  []
+(defn initialized? []
   (some? (:section-id @sync-state)))
-
-(defn get-sync-status
-  "Returns current sync status for UI display."
-  []
-  (select-keys @sync-state [:status :last-sync :dirty?]))

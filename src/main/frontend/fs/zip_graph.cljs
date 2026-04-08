@@ -1,8 +1,10 @@
 (ns frontend.fs.zip-graph
   "ZIP pack/unpack utilities for Logseq graphs.
-   Bridges between LightningFS (in-browser filesystem) and JSZip archives."
+   Bridges between the local filesystem (NFS/File System Access API) and JSZip archives."
   (:require ["jszip" :as JSZip]
             [clojure.string :as string]
+            [frontend.fs :as fs]
+            [frontend.fs.nfs :as nfs]
             [logseq.common.path :as path]
             [promesa.core :as p]))
 
@@ -13,60 +15,27 @@
   [relative-path]
   (or (string/starts-with? relative-path "logseq/bak/")
       (string/starts-with? relative-path "logseq/.recycle/")
+      (string/starts-with? relative-path ".logseq-onenote-base/")
       (string/starts-with? relative-path ".git/")
       (string/starts-with? relative-path "node_modules/")
       (string/starts-with? relative-path "logseq/version-files/")))
 
-;; ---- LightningFS helpers ----
-
-(defn- <readdir-recursive
-  "Read all file paths from LightningFS under dir recursively.
-   Returns a vector of absolute paths."
-  [dir]
-  (p/let [entries (-> (.readdir js/window.pfs dir)
-                      (p/then (fn [r] (js->clj r))))]
-    (p/let [results
-            (p/all
-             (map (fn [entry]
-                    (let [full (path/path-join dir entry)]
-                      (p/let [stat (.stat js/window.pfs full)]
-                        (if (= (.-type stat) "file")
-                          (p/resolved [full])
-                          (<readdir-recursive full)))))
-                  entries))]
-      (vec (apply concat results)))))
-
-(defn- <mkdir-recursive!
-  "Create a directory and all parent directories."
-  [dir]
-  (-> (js/window.pfs.stat dir)
-      (p/then (fn [_] nil))
-      (p/catch
-       (fn [_]
-         (p/let [parent (path/parent dir)
-                 _ (when (and parent (not= parent dir))
-                     (<mkdir-recursive! parent))]
-           (-> (js/window.pfs.mkdir dir)
-               (p/catch (fn [_] nil))))))))
-
-;; ---- Pack (LightningFS → ZIP) ----
+;; ---- Pack (local folder → ZIP) ----
 
 (defn <pack-graph
-  "Read all files from a LightningFS directory and pack into a ZIP.
-   local-dir: memory:// URL, e.g. 'memory:///onenote-Notes'
+  "Read all files from a local folder graph and pack into a ZIP.
+   repo-dir: the graph directory name (e.g. 'my-notes')
    Returns Promise<ArrayBuffer>."
-  [local-dir]
-  (let [root (path/url-to-path local-dir)
-        zip (JSZip.)]
-    (p/let [all-paths (<readdir-recursive root)
-            _ (p/all
-               (map (fn [fpath]
-                      (let [rel-path (subs fpath (inc (count root)))]
-                        (when-not (skip-path? rel-path)
-                          (p/let [content (.readFile js/window.pfs fpath)]
-                            (.file zip rel-path content)))))
-                    all-paths))]
-      (.generateAsync zip #js {:type "arraybuffer"}))))
+  [repo-dir]
+  (let [zip (JSZip.)]
+    (p/let [{:keys [files]} (fs/get-files repo-dir)]
+      (p/let [_ (p/all
+                 (map (fn [{:keys [path content]}]
+                        (when (and (not (skip-path? path))
+                                   (some? content))
+                          (.file zip path content)))
+                      files))]
+        (.generateAsync zip #js {:type "arraybuffer"})))))
 
 ;; ---- Unpack (ZIP → map) ----
 
@@ -87,38 +56,27 @@
                         entries))]
     (into {} (remove nil? results))))
 
-;; ---- Unpack (ZIP → LightningFS) ----
-
-(defn <unpack-zip-to-fs
-  "Unpack a ZIP ArrayBuffer directly into a LightningFS directory.
-   target-dir: absolute LightningFS path, e.g. '/onenote-Notes'
-   Returns the file map {relative-path -> content}."
-  [arraybuffer target-dir]
-  (p/let [file-map (<unpack-zip arraybuffer)
-          _ (p/all
-             (map (fn [[rel-path content]]
-                    (let [full-path (path/path-join target-dir rel-path)
-                          parent (path/parent full-path)]
-                      (p/let [_ (<mkdir-recursive! parent)]
-                        (.writeFile js/window.pfs full-path content))))
-                  file-map))]
-    file-map))
-
 ;; ---- Read local files to map ----
 
 (defn <read-local-files
-  "Read all files from a LightningFS directory into a map.
-   local-dir: memory:// URL, e.g. 'memory:///onenote-Notes'
+  "Read all files from a local folder graph into a map.
+   repo-dir: the graph directory name
    Returns {relative-path -> content-string}."
-  [local-dir]
-  (let [root (path/url-to-path local-dir)]
-    (p/let [all-paths (<readdir-recursive root)
-            results (p/all
-                     (map (fn [fpath]
-                            (let [rel-path (subs fpath (inc (count root)))]
-                              (when-not (skip-path? rel-path)
-                                (p/let [content (-> (.readFile js/window.pfs fpath #js {:encoding "utf8"})
-                                                    (p/then (fn [c] (.toString c))))]
-                                  [rel-path content]))))
-                          all-paths))]
-      (into {} (remove nil? results)))))
+  [repo-dir]
+  (p/let [{:keys [files]} (fs/get-files repo-dir)]
+    (into {} (keep (fn [{:keys [path content]}]
+                     (when (and (not (skip-path? path))
+                                (some? content))
+                       [path content]))
+                   files))))
+
+;; ---- Write files to local folder ----
+
+(defn <write-file-to-local
+  "Write a single file to the local folder graph via NFS handles.
+   repo-dir: the graph directory name
+   rel-path: relative path within the graph (e.g. 'pages/foo.md')
+   content: file content string"
+  [repo repo-dir rel-path content]
+  (fs/write-plain-text-file! repo repo-dir rel-path content
+                              {:skip-compare? true}))
