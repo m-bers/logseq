@@ -61,9 +61,10 @@
       (def OAUTH-DOMAIN "logseq-test2.auth.us-east-2.amazoncognito.com")
       (def CONNECTIVITY-TESTING-S3-URL "https://logseq-connectivity-testing-prod.s3.us-east-1.amazonaws.com/logseq-connectivity-testing")))
 
-;; OneDrive / MSAL configuration
+;; OneNote / MSAL configuration
 ;; ==============================
-(goog-define MSAL-CLIENT-ID "75ab3d28-440a-4f41-b46a-b4ed7cb420fc")
+(goog-define MSAL-CLIENT-ID "0aca83cc-ae07-4b1f-a62d-0e4a82fa00d4")
+(goog-define ONENOTE-SECTION-NAME "Logseq")
 (def msal-redirect-uri
   (if dev?
     "http://localhost:3001"
@@ -412,9 +413,10 @@
     (= repo-url "local")
     "memory:///local"
 
-    ;; OneDrive graphs stored in LightningFS (memory://)
+    ;; OneNote/OneDrive graphs stored in LightningFS (memory://)
     (and (local-db? repo-url)
-         (string/starts-with? (get-local-dir repo-url) "onedrive-"))
+         (or (string/starts-with? (get-local-dir repo-url) "onenote-")
+             (string/starts-with? (get-local-dir repo-url) "onedrive-")))
     (str "memory:///" (get-local-dir repo-url))
 
     ;; nfs, browser-fs-access

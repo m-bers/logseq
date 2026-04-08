@@ -9,7 +9,7 @@
 (defonce ^:private current-account (atom nil))
 (defonce ^:private auth-redirect-url (atom nil))
 
-(def ^:private graph-scopes #js ["Files.ReadWrite" "User.Read"])
+(def ^:private graph-scopes #js ["Notes.ReadWrite.All"])
 
 (def ^:private default-authority "https://login.microsoftonline.com/common")
 

@@ -2,7 +2,7 @@
   (:require [frontend.auth.msal :as msal]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
-            [frontend.handler.onedrive :as onedrive-handler]
+            [frontend.handler.onenote :as onenote-handler]
             [frontend.handler.page :as page-handler]
             [frontend.handler.web.nfs :as nfs]
             [frontend.mobile.util :as mobile-util]
@@ -53,11 +53,13 @@
         (when (seq config/MSAL-CLIENT-ID)
           [:div.mt-6
            (ui/button
-            (if (msal/logged-in?) "Sync OneDrive" "Connect OneDrive")
+            (if (msal/logged-in?) "Sync OneNote" "Connect OneNote")
             :on-click (fn []
                         (if (msal/logged-in?)
-                          (onedrive-handler/<sync-onedrive!)
-                          (onedrive-handler/<connect-onedrive-graph!))))])]))])
+                          (onenote-handler/<sync-onenote!)
+                          (let [url (js/prompt "Paste your OneNote notebook URL:")]
+                            (when (seq url)
+                              (onenote-handler/<connect-onenote-graph! url))))))])]))])
 
 (rum/defc android-permission-alert
   []

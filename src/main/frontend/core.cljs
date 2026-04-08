@@ -3,7 +3,7 @@
   {:dev/always true}
   (:require [rum.core :as rum]
             [frontend.handler :as handler]
-            [frontend.handler.onedrive :as onedrive-handler]
+            [frontend.handler.onenote :as onenote-handler]
             [frontend.handler.plugin :as plugin-handler]
             [frontend.handler.route :as route-handler]
             [frontend.page :as page]
@@ -63,7 +63,7 @@
   (plugin-handler/setup!
    #(handler/start! start))
   ;; Initialize MSAL for OneDrive auth (non-blocking)
-  (onedrive-handler/<init-msal!))
+  (onenote-handler/<init-msal!))
 
 (defn stop []
   ;; stop is called before any code is reloaded
