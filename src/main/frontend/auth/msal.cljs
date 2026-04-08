@@ -3,7 +3,6 @@
    Provides OneDrive OAuth2 authentication via Microsoft Entra ID."
   (:require ["@azure/msal-browser" :as msal-browser]
             [promesa.core :as p]
-            [frontend.state :as state]
             [lambdaisland.glogi :as log]))
 
 (defonce ^:private msal-instance (atom nil))
@@ -71,9 +70,8 @@
       (let [account (.-account response)]
         (reset! current-account account)
         (.setActiveAccount pca account)
-        (state/pub-event! [:onedrive/logged-in {:name (.-name account)
-                                                 :username (.-username account)}])
-        (log/info :msal/login-success {:name (.-name account)})
+        (log/info :msal/login-success {:name (.-name account)
+                                       :username (.-username account)})
         account))))
 
 (defn logout!
@@ -83,7 +81,6 @@
     (p/let [_ (.logoutPopup pca #js {:account @current-account
                                       :postLogoutRedirectUri @auth-redirect-url})]
       (reset! current-account nil)
-      (state/pub-event! [:onedrive/logged-out])
       (log/info :msal/logout {}))))
 
 (defn get-token

@@ -412,6 +412,11 @@
     (= repo-url "local")
     "memory:///local"
 
+    ;; OneDrive graphs stored in LightningFS (memory://)
+    (and (local-db? repo-url)
+         (string/starts-with? (get-local-dir repo-url) "onedrive-"))
+    (str "memory:///" (get-local-dir repo-url))
+
     ;; nfs, browser-fs-access
     ;; Format: logseq_local_{dir-name}
     (local-db? repo-url)

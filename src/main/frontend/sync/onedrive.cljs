@@ -10,7 +10,6 @@
    - Queues writes when offline, flushes when back online"
   (:require [frontend.auth.msal :as msal]
             [frontend.fs.onedrive :as graph]
-            [frontend.state :as state]
             [lambdaisland.glogi :as log]
             [logseq.common.path :as path]
             [promesa.core :as p]))
@@ -179,17 +178,15 @@
   []
   (when (and (msal/logged-in?) js/navigator.onLine)
     (swap! sync-state assoc :status :syncing)
-    (state/pub-event! [:onedrive/sync-start])
+    (log/info :onedrive-sync/start {})
     (-> (p/let [_ (push!)
                 n-pulled (pull!)]
           (swap! sync-state assoc
                  :status :idle
                  :last-sync (js/Date.))
-          (state/pub-event! [:onedrive/sync-complete {:pulled n-pulled}])
           (log/info :onedrive-sync/complete {:pulled n-pulled}))
         (p/catch (fn [error]
                    (swap! sync-state assoc :status :error)
-                   (state/pub-event! [:onedrive/sync-error {:error (str error)}])
                    (log/error :onedrive-sync/error {:error error}))))))
 
 ;; ---- Initial sync (first connection) ----
