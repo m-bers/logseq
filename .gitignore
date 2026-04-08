@@ -63,3 +63,16 @@ deps/shui/.lsp
 deps/shui/.lsp-cache
 deps/shui/.clj-kondo
 deps/shui/shui-graph/logseq/bak
+
+# Playwright / testing artifacts
+.playwright-cli/
+.playwright-mcp/
+*.png
+
+# Claude Code
+.claude/
+CONVERSATION.md
+
+# Docker dev
+Dockerfile.dev
+.dockerignore

@@ -112,17 +112,28 @@
   "Notify Logseq's watcher handler about a file change so the datascript DB is updated."
   [local-path content change-type]
   (let [{:keys [local-dir]} @sync-state
-        dir local-dir
         ;; local-path is absolute like /onedrive-Notes/pages/foo.md
         ;; relative path should be like pages/foo.md
         local-root (path/url-to-path local-dir)
         rel-path (subs local-path (inc (count local-root)))]
+    ;; handle-changed! compares dir to (config/get-local-dir repo) which is just
+    ;; the dir name without memory:// prefix. Pass local-dir so get-fs routes
+    ;; correctly, but the watcher handler's (= dir repo-dir) check uses
+    ;; get-local-dir which returns the name without prefix.
+    ;; Use "add" type which doesn't check (= dir repo-dir).
     (watcher-handler/handle-changed!
-     change-type
-     {:dir dir
+     (if (= change-type "change") "add" change-type)
+     {:dir local-dir
       :path rel-path
       :content content
       :stat {:mtime (js/Date.now)}})))
+
+(defn- skip-remote-path?
+  "Skip backup, recycle, and non-content files from delta sync."
+  [remote-path]
+  (or (string/includes? remote-path "/logseq/bak/")
+      (string/includes? remote-path "/logseq/.recycle/")
+      (string/includes? remote-path "/.git/")))
 
 (defn- apply-remote-change
   "Apply a single remote change to local fs and update datascript DB."
@@ -136,7 +147,7 @@
             parent-suffix (second (re-find #"/drive/root:/(.*)" (or remote-path "")))
             full-remote (when parent-suffix (str parent-suffix "/" name))
             local-path (when full-remote (remote->local full-remote))]
-        (when local-path
+        (when (and local-path (not (skip-remote-path? (or full-remote ""))))
           (if deleted?
             (p/do!
              (log/info :onedrive-sync/delete-local {:path local-path})
