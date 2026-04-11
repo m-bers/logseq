@@ -179,9 +179,9 @@
 
 ;; ---- URL parsing & notebook discovery ----
 
-(defn parse-onenote-url
-  "Extract notebook GUID and optional page name from a pasted OneNote URL.
-   Supports business (sharepoint.com) and personal (onedrive.live.com) URLs.
+(defn- parse-sourcedoc-url
+  "Extract notebook GUID from a OneNote URL with sourcedoc parameter.
+   Format: ...?sourcedoc={GUID}...
    Returns {:notebook-guid :page-name} or nil."
   [url]
   (let [decoded (js/decodeURIComponent url)
@@ -191,34 +191,7 @@
       {:notebook-guid (string/lower-case (second guid-match))
        :page-name (when page-match (second page-match))})))
 
-(defn fetch-all-notebooks
-  "Fetch all OneNote notebooks the user can access (personal + shared).
-   Returns [{:name :id :site-id} ...]."
-  [token]
-  (p/let [;; Personal notebooks
-          personal-url (str graph-base "/me/onenote/notebooks?$select=displayName,id,links&$top=100")
-          personal-data (graph-fetch token personal-url)
-          personal-nbs (mapv (fn [nb] {:name (:displayName nb)
-                                        :id (:id nb)
-                                        :site-id nil})
-                             (:value personal-data))]
-    ;; For now just return personal notebooks.
-    ;; Site notebooks are accessed directly by site-id + notebook-id.
-    personal-nbs))
-
-(defn find-notebook-by-guid
-  "Search the user's accessible notebooks for one matching a GUID.
-   The GUID comes from a OneNote URL's sourcedoc parameter.
-   Returns {:name :id :site-id} or nil."
-  [token guid]
-  (p/let [notebooks (fetch-all-notebooks token)]
-    ;; Notebook IDs contain the GUID. Format varies but the GUID is embedded.
-    (some (fn [nb]
-            (when (string/includes? (string/lower-case (:id nb)) guid)
-              nb))
-          notebooks)))
-
-(defn parse-oneintranote-url
+(defn- parse-oneintranote-url
   "Parse a OneIntraNote-style URL to extract site-id and notebook-id directly.
    Format: .../s/{siteId}/nb/{notebookId}/...
    Returns {:site-id :notebook-id} or nil."
@@ -229,15 +202,54 @@
       {:site-id (second match)
        :notebook-id (nth match 2)})))
 
-(defn resolve-notebook-from-url
-  "Given a pasted URL (OneNote or OneIntraNote format), find the notebook.
-   Returns a promise of {:name :id :site-id} or nil.
-
+(defn- parse-sharepoint-site-path
+  "Extract the SharePoint host and site path from a SharePoint URL.
    Supports:
-   - OneIntraNote URLs: /s/{siteId}/nb/{notebookId}/... (direct extraction)
-   - OneNote URLs: ...?sourcedoc={GUID}... (searches user's notebooks)"
+   - https://tenant.sharepoint.com/sites/SiteName/...
+   - https://tenant.sharepoint.com/:o:/s/SiteName/...
+   Returns {:host :site-path} or nil."
+  [url]
+  (let [decoded (js/decodeURIComponent url)
+        ;; Match /sites/Name or /:o:/s/Name patterns
+        match (or (re-find #"([\w-]+\.sharepoint\.com)/sites/([^/?#]+)" decoded)
+                  (re-find #"([\w-]+\.sharepoint\.com)/:[a-z]+:/s/([^/?#]+)" decoded))]
+    (when match
+      {:host (second match)
+       :site-path (str "/sites/" (nth match 2))})))
+
+(defn- resolve-site-id
+  "Resolve a SharePoint site URL to a Graph API site ID.
+   Uses GET /sites/{host}:{path} — requires Sites.Read.All scope.
+   Falls back with a helpful error if permission is denied."
+  [token host site-path]
+  (p/let [url (str graph-base "/sites/" host ":" site-path)
+          resp (js/fetch url (clj->js {:headers {"Authorization" (str "Bearer " token)}}))]
+    (if (.-ok resp)
+      (p/let [data (.json resp)]
+        (:id (js->clj data :keywordize-keys true)))
+      (throw (ex-info (str "Cannot resolve SharePoint site. Try pasting a OneIntraNote URL instead "
+                           "(format: .../s/{siteId}/nb/{notebookId}/...)")
+                       {:status (.-status resp) :host host :site-path site-path})))))
+
+(defn- list-site-notebooks
+  "List all notebooks on a SharePoint site."
+  [token site-id]
+  (p/let [base (onenote-base site-id)
+          url (str base "/notebooks?$select=displayName,id")
+          data (graph-fetch token url)]
+    (mapv (fn [nb] {:name (:displayName nb)
+                     :id (:id nb)
+                     :site-id site-id})
+          (:value data))))
+
+(defn resolve-notebook-from-url
+  "Given a pasted URL, find the notebook. Supports:
+   1. OneIntraNote URLs: /s/{siteId}/nb/{notebookId}/... (direct)
+   2. sourcedoc URLs: ...?sourcedoc={GUID}... (search personal notebooks)
+   3. SharePoint URLs: tenant.sharepoint.com/sites/Name/... (resolve site, list notebooks)
+   Returns a promise of {:name :id :site-id} or nil."
   [token url]
-  ;; Try OneIntraNote URL format first (has site-id + notebook-id directly)
+  ;; 1. Try OneIntraNote URL format (has site-id + notebook-id directly)
   (if-let [{:keys [site-id notebook-id]} (parse-oneintranote-url url)]
     (p/let [base (onenote-base site-id)
             nb-url (str base "/notebooks/" notebook-id "?$select=displayName,id")
@@ -245,6 +257,26 @@
       {:name (:displayName data)
        :id (:id data)
        :site-id site-id})
-    ;; Fall back to OneNote URL parsing (sourcedoc GUID)
-    (when-let [{:keys [notebook-guid]} (parse-onenote-url url)]
-      (find-notebook-by-guid token notebook-guid))))
+    ;; 2. Try SharePoint URL (resolve site → list notebooks → pick first or only)
+    (if-let [{:keys [host site-path]} (parse-sharepoint-site-path url)]
+      (p/let [site-id (resolve-site-id token host site-path)
+              notebooks (list-site-notebooks token site-id)]
+        ;; If sourcedoc GUID is in the URL, match by GUID; otherwise take first notebook
+        (let [{:keys [notebook-guid]} (parse-sourcedoc-url url)]
+          (or (when notebook-guid
+                (some (fn [nb]
+                        (when (string/includes? (string/lower-case (:id nb))
+                                                notebook-guid)
+                          nb))
+                      notebooks))
+              (first notebooks))))
+      ;; 3. Fall back to sourcedoc GUID search in personal notebooks
+      (when-let [{:keys [notebook-guid]} (parse-sourcedoc-url url)]
+        (p/let [personal-url (str graph-base "/me/onenote/notebooks?$select=displayName,id&$top=100")
+                personal-data (graph-fetch token personal-url)
+                notebooks (mapv (fn [nb] {:name (:displayName nb) :id (:id nb) :site-id nil})
+                                (:value personal-data))]
+          (some (fn [nb]
+                  (when (string/includes? (string/lower-case (:id nb)) notebook-guid)
+                    nb))
+                notebooks))))))
