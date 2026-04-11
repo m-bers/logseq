@@ -211,8 +211,8 @@
   [url]
   (let [decoded (js/decodeURIComponent url)
         ;; Match /sites/Name or /:o:/s/Name patterns
-        match (or (re-find #"([\w-]+\.sharepoint\.com)/sites/([^/?#]+)" decoded)
-                  (re-find #"([\w-]+\.sharepoint\.com)/:[a-z]+:/s/([^/?#]+)" decoded))]
+        match (or (re-find #"([\w.-]+\.sharepoint\.com)/sites/([^/?#]+)" decoded)
+                  (re-find #"([\w.-]+\.sharepoint\.com)/:[a-z]+:/s/([^/?#]+)" decoded))]
     (when match
       {:host (second match)
        :site-path (str "/sites/" (nth match 2))})))
